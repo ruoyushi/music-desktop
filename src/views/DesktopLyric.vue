@@ -287,6 +287,9 @@ onMounted(async () => {
     unlistenCmd = await listen<string>("desktop-lyric:cmd", (e) => {
       if (e.payload === "unlock") unlock();
     });
+    // 刚打开时主动向主窗口要一次快照，保证立即跟唱
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("player:state:request");
   } catch {
     // ignore
   }

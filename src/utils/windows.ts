@@ -1,5 +1,7 @@
 /** 多窗口管理：迷你播放器 / 桌面歌词 */
 
+import { invoke } from "@tauri-apps/api/core";
+
 /** 显示并聚焦主窗口（关闭到托盘后可从此恢复） */
 export async function openMainWindow() {
   try {
@@ -52,43 +54,7 @@ export async function openMiniPlayer() {
 
 export async function openDesktopLyric() {
   try {
-    const { WebviewWindow, getAllWebviewWindows } = await import(
-      "@tauri-apps/api/webviewWindow"
-    );
-    const { emit } = await import("@tauri-apps/api/event");
-    const existing = (await getAllWebviewWindows()).find((w) => w.label === "lyric");
-    if (existing) {
-      // 再次打开：确保可点、解锁并聚焦
-      try {
-        await existing.setIgnoreCursorEvents(false);
-      } catch {
-        // ignore
-      }
-      try {
-        await emit("desktop-lyric:cmd", "unlock");
-      } catch {
-        // ignore
-      }
-      await existing.show();
-      await existing.setFocus();
-      return existing;
-    }
-    const win = new WebviewWindow("lyric", {
-      url: "/#/lyric",
-      title: "桌面歌词",
-      width: 480,
-      height: 200,
-      minWidth: 320,
-      minHeight: 160,
-      decorations: false,
-      alwaysOnTop: true,
-      resizable: true,
-      skipTaskbar: true,
-      transparent: true,
-      shadow: false,
-      center: true,
-    });
-    return win;
+    await invoke("open_desktop_lyric");
   } catch (e) {
     console.warn("openDesktopLyric failed", e);
     return null;

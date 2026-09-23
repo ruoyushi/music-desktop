@@ -22,6 +22,15 @@
 - **在线更新**（GitHub Releases + Tauri Updater，无需自建服务器）
 - **音频本地缓存**（安装目录 `cache_dir/audio`，播过后再次播放走本地）
 
+## 本仓库补充：macOS 桌面歌词
+本仓库基于 [hsg965/music-desktop](https://github.com/hsg965/music-desktop) 修改，主要补充 macOS 上的歌词显示能力：
+
+- macOS 原生悬浮歌词窗：歌词窗口在 Rust 侧创建，支持置顶、跨桌面显示、未激活时首次点击可用
+- **网页内歌词浮层**：应用在本机 `127.0.0.1:39517` 提供当前歌词 JSON（端口占用时自动顺延到 39518/39519），配套 Chrome 扩展在任意网页的最上层渲染歌词；浏览器全屏（含 macOS 全屏空间）时同样可见，`Alt+Shift+L` 可按标签页开关
+- 扩展安装与使用说明见 [`chrome-extension/README.md`](chrome-extension/README.md)
+
+歌词数据由 Music Desktop 提供，因此需要先在应用里播放歌曲；扩展装好后请重新加载一次网页。
+
 ## 技术栈
 
 - Tauri 2 / Rust
@@ -57,6 +66,14 @@ pnpm tauri:build
 ```
 
 产物在 `src-tauri/target/release/bundle/`。
+
+macOS 透明桌面歌词需要启用 Tauri 的 `macOSPrivateApi`。仓库已经开启，并将歌词窗口放在 Rust 侧创建，以支持所有桌面可见和未激活时首次点击可用：
+
+```bash
+pnpm tauri build --bundles app --no-sign
+```
+
+生成的 `.app` 位于 `src-tauri/target/release/bundle/macos/`。
 
 ### GitHub Actions 自动发布（Windows + macOS）
 

@@ -113,6 +113,18 @@ export const usePlayerStore = defineStore("player", () => {
     try {
       const { emit } = await import("@tauri-apps/api/event");
       await emit("player:state", snapshot());
+      // 同步给本机歌词接口（Chrome 页面内的悬浮歌词用）
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("update_lyric_overlay", {
+        input: {
+          lyricText: lyricText.value,
+          tlyricText: tlyricText.value,
+          currentTime: currentTime.value,
+          playing: playing.value,
+          title: currentTrack.value?.name ?? "",
+          artist: (currentTrack.value?.artist ?? []).join(", "),
+        },
+      });
     } catch {
       // 浏览器预览时忽略
     }
@@ -493,6 +505,8 @@ export const usePlayerStore = defineStore("player", () => {
         else if (cmd === "pause") pause();
         else if (cmd === "play" && !playing.value) await toggle();
       });
+      // 桌面歌词 / 迷你窗刚打开时主动补一次状态，避免错过推送
+      await listen("player:state:request", () => broadcastState());
     } catch {
       // ignore
     }

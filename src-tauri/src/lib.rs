@@ -6,6 +6,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
+    AppHandle, WebviewUrl, WebviewWindowBuilder,
 };
 
 const API_BASE: &str = "https://music-api.gdstudio.xyz/api.php";
@@ -368,6 +369,367 @@ fn clear_audio_cache() -> Result<u64, String> {
     Ok(removed)
 }
 
+/// macOS：让歌词窗压在其它应用的全屏窗口之上。
+/// Chromium 全屏窗口会压在普通置顶窗口之上，所以这里需要三件事：
+/// FullScreenAuxiliary + CanJoinAllSpaces（加入他人全屏所在的空间），
+/// 以及远高于普通置顶的窗口层级（NSScreenSaverWindowLevel）。
+#[cfg(target_os = "macos")]
+fn elevate_lyric_window_over_fullscreen(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior};
+
+    let ns_window = win
+        .ns_window()
+        .map_err(|e| format!("获取歌词窗口句柄失败: {e}"))? as usize;
+
+    app.run_on_main_thread(move || {
+        let ns_window = ns_window as *mut NSWindow;
+        if ns_window.is_null() {
+            return;
+        }
+        // SAFETY: 指针来自 tauri 的 ns_window()，且只在主线程访问 AppKit 对象。
+        unsafe {
+            let ns_window = &*ns_window;
+            let behavior = ns_window.collectionBehavior()
+                | NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary;
+            ns_window.setCollectionBehavior(behavior);
+            ns_window.setLevel(NSScreenSaverWindowLevel);
+            ns_window.setHidesOnDeactivate(false);
+            ns_window.orderFrontRegardless();
+        }
+    })
+    .map_err(|e| format!("设置歌词跨全屏悬浮失败: {e}"))
+}
+
+/// macOS：首次打开时把歌词窗放到副屏（外接屏）底部居中；没有副屏时才落回主屏。
+#[cfg(target_os = "macos")]
+fn place_lyric_on_secondary_display(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+) -> Result<(), String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSScreen, NSWindow};
+    use objc2_foundation::NSPoint;
+
+    let ns_window = win
+        .ns_window()
+        .map_err(|e| format!("获取歌词窗口句柄失败: {e}"))? as usize;
+
+    app.run_on_main_thread(move || {
+        let ns_window = ns_window as *mut NSWindow;
+        if ns_window.is_null() {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        // SAFETY: 指针来自 tauri 的 ns_window()，且只在主线程访问 AppKit 对象。
+        unsafe {
+            let ns_window = &*ns_window;
+            let screens = NSScreen::screens(mtm);
+            let main = NSScreen::mainScreen(mtm);
+            let main_origin = main.as_ref().map(|s| s.frame().origin);
+
+            let mut target = main;
+            for screen in screens.iter() {
+                let origin = screen.frame().origin;
+                let is_main = match main_origin {
+                    Some(m) => m.x == origin.x && m.y == origin.y,
+                    None => true,
+                };
+                if !is_main {
+                    target = Some(screen);
+                    break;
+                }
+            }
+
+            let Some(target) = target else {
+                return;
+            };
+            let visible = target.visibleFrame();
+            let frame = ns_window.frame();
+            let x = visible.origin.x + (visible.size.width - frame.size.width) / 2.0;
+            let y = visible.origin.y + (visible.size.height * 0.08).max(24.0);
+
+            ns_window.setFrameOrigin(NSPoint::new(x, y));
+        }
+    })
+    .map_err(|e| format!("设置歌词窗位置失败: {e}"))
+}
+
+/// macOS：歌词窗的“守卫”。
+/// Chrome 进入全屏会新建一个“空间”，已经存在的窗口不会被自动放进去，
+/// 所以这里持续盯着窗口：先重新排序，尝试让 WindowServer 把它放回当前空间；
+/// 若仍然不可见，就重建一次窗口（新窗口会直接落在当前全屏空间里）。
+/// 所以这里持续盯着窗口，被别的窗口盖住就重新置顶（系统层级 + 重新排序）。
+
+#[cfg(target_os = "macos")]
+static LYRIC_KEEPER_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+fn start_lyric_window_keeper(app: &AppHandle) {
+    use objc2_app_kit::{
+        NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
+    };
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    if LYRIC_KEEPER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut missing_ticks = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if app.get_webview_window("lyric").is_none() {
+                missing_ticks += 1;
+                if missing_ticks > 6 {
+                    break;
+                }
+                continue;
+            }
+            missing_ticks = 0;
+            let app_for_tick = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(win) = app_for_tick.get_webview_window("lyric") else {
+                    return;
+                };
+                let Ok(ptr) = win.ns_window() else {
+                    return;
+                };
+                // SAFETY: 句柄来自 tauri，且只在主线程访问 AppKit 对象。
+                let w = unsafe { &*(ptr as *mut NSWindow) };
+                let wanted = NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::IgnoresCycle;
+                if w.level() != NSScreenSaverWindowLevel {
+                    w.setLevel(NSScreenSaverWindowLevel);
+                }
+                if !w.collectionBehavior().contains(wanted) {
+                    w.setCollectionBehavior(w.collectionBehavior() | wanted);
+                }
+                let visible = w.occlusionState().contains(NSWindowOcclusionState::Visible);
+                if visible {
+                    return;
+                }
+                // 被别的窗口盖住时重新排序，尽量把它顶回最前面。
+                w.setLevel(NSScreenSaverWindowLevel);
+                w.orderFrontRegardless();
+            });
+        }
+        LYRIC_KEEPER_RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 创建（或重建）桌面歌词窗口，并完成置顶 / 跨全屏 / 定位。
+fn create_lyric_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let win = WebviewWindowBuilder::new(
+        app,
+        "lyric",
+        WebviewUrl::App("index.html#/lyric".into()),
+    )
+    .title("桌面歌词")
+    .inner_size(480.0, 200.0)
+    .min_inner_size(320.0, 160.0)
+    .decorations(false)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .transparent(true)
+    .shadow(false)
+    .resizable(true)
+    .focused(false)
+    .accept_first_mouse(true)
+    .visible(false)
+    .build()
+    .map_err(|e| format!("创建桌面歌词窗口失败: {e}"))?;
+
+    win.set_ignore_cursor_events(false)
+        .map_err(|e| format!("设置桌面歌词鼠标事件失败: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        // 必须在窗口第一次上屏之前设好层级与跨空间行为，
+        // 否则 WindowServer 已经按普通窗口把它分好空间了。
+        win.set_visible_on_all_workspaces(true)
+            .map_err(|e| format!("设置桌面歌词跨桌面显示失败: {e}"))?;
+        elevate_lyric_window_over_fullscreen(app, &win)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    win.center()
+        .map_err(|e| format!("居中桌面歌词失败: {e}"))?;
+    win.show()
+        .map_err(|e| format!("显示桌面歌词失败: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        place_lyric_on_secondary_display(app, &win)?;
+        start_lyric_window_keeper(app);
+    }
+    Ok(win)
+}
+
+#[tauri::command]
+fn open_desktop_lyric(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("lyric") {
+        win.set_ignore_cursor_events(false)
+            .map_err(|e| format!("设置桌面歌词鼠标事件失败: {e}"))?;
+        // macOS 的置顶 / 跨桌面交给 elevate_lyric_window_over_fullscreen（要盖住全屏应用）
+        #[cfg(not(target_os = "macos"))]
+        win.set_always_on_top(true)
+            .map_err(|e| format!("设置桌面歌词置顶失败: {e}"))?;
+        if win.is_minimized().unwrap_or(false) {
+            let _ = win.unminimize();
+        }
+        win.show()
+            .map_err(|e| format!("显示桌面歌词失败: {e}"))?;
+        #[cfg(target_os = "macos")]
+        {
+            elevate_lyric_window_over_fullscreen(&app, &win)?;
+            start_lyric_window_keeper(&app);
+        }
+        let _ = win.emit("desktop-lyric:cmd", "unlock");
+        return Ok(());
+    }
+
+    create_lyric_window(&app)?;
+    Ok(())
+}
+
+// ---------- Chrome 扩展用的本地歌词悬浮层接口 ----------
+
+/// 前端推送过来的播放信息（歌词原文 + 进度）
+#[derive(serde::Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct LyricOverlayInput {
+    lyric_text: String,
+    tlyric_text: String,
+    current_time: f64,
+    playing: bool,
+    title: String,
+    artist: String,
+}
+
+/// 本地 HTTP 接口返回给 Chrome 扩展的内容
+#[derive(serde::Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct LyricOverlayOutput {
+    visible: bool,
+    line: String,
+    next: String,
+    translation: String,
+    title: String,
+    artist: String,
+    playing: bool,
+}
+
+struct LyricOverlayState(std::sync::Arc<std::sync::Mutex<LyricOverlayOutput>>);
+
+/// 解析 LRC 时间标签（[mm:ss.xx] / [mm:ss]）
+fn parse_lrc_seconds(tag: &str) -> Option<f64> {
+    let (mm, rest) = tag.split_once(':')?;
+    if rest.contains(':') {
+        return None;
+    }
+    let minutes: f64 = mm.trim().parse().ok()?;
+    let seconds: f64 = rest.trim().parse().ok()?;
+    Some(minutes * 60.0 + seconds)
+}
+
+fn parse_lrc_lines(text: &str) -> Vec<(f64, String)> {
+    let mut out: Vec<(f64, String)> = Vec::new();
+    for raw in text.lines() {
+        let mut rest = raw.trim();
+        let mut times: Vec<f64> = Vec::new();
+        while let Some(stripped) = rest.strip_prefix('[') {
+            let Some(end) = stripped.find(']') else { break };
+            let Some(seconds) = parse_lrc_seconds(&stripped[..end]) else { break };
+            times.push(seconds);
+            rest = stripped[end + 1..].trim_start();
+        }
+        let content = rest.trim();
+        if content.is_empty() || times.is_empty() {
+            continue;
+        }
+        for seconds in times {
+            out.push((seconds, content.to_string()));
+        }
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// 返回（当前行，下一行）
+fn lyric_lines_at(lines: &[(f64, String)], position: f64) -> (String, String) {
+    let index = lines.iter().rposition(|(start, _)| *start <= position + 0.2);
+    match index {
+        Some(i) => (
+            lines[i].1.clone(),
+            lines.get(i + 1).map(|l| l.1.clone()).unwrap_or_default(),
+        ),
+        None => (
+            String::new(),
+            lines.first().map(|l| l.1.clone()).unwrap_or_default(),
+        ),
+    }
+}
+
+#[tauri::command]
+fn update_lyric_overlay(
+    state: tauri::State<LyricOverlayState>,
+    input: LyricOverlayInput,
+) -> Result<(), String> {
+    let lines = parse_lrc_lines(&input.lyric_text);
+    let translations = parse_lrc_lines(&input.tlyric_text);
+    let (line, next) = lyric_lines_at(&lines, input.current_time);
+    let (translation, _) = lyric_lines_at(&translations, input.current_time);
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    *guard = LyricOverlayOutput {
+        visible: !line.is_empty() || !next.is_empty(),
+        line,
+        next,
+        translation,
+        title: input.title,
+        artist: input.artist,
+        playing: input.playing,
+    };
+    Ok(())
+}
+
+/// 只监听回环地址，给 Chrome 扩展读当前歌词
+fn spawn_lyric_overlay_server(state: std::sync::Arc<std::sync::Mutex<LyricOverlayOutput>>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    std::thread::spawn(move || {
+        let listener = [39517u16, 39518, 39519]
+            .iter()
+            .find_map(|port| TcpListener::bind(("127.0.0.1", *port)).ok());
+        let Some(listener) = listener else {
+            return;
+        };
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let body = state
+                .lock()
+                .map(|guard| serde_json::to_string(&*guard).unwrap_or_else(|_| "{}".into()))
+                .unwrap_or_else(|_| "{}".into());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.as_bytes().len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -376,6 +738,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            open_desktop_lyric,
+            update_lyric_overlay,
             proxy_api,
             download_file,
             get_audio_cache_dir,
@@ -389,6 +753,13 @@ pub fn run() {
             if let Ok(dir) = audio_cache_dir() {
                 let _ = app.asset_protocol_scope().allow_directory(&dir, true);
             }
+
+            // 给 Chrome 扩展提供当前歌词（只绑定 127.0.0.1）
+            let overlay_state = std::sync::Arc::new(std::sync::Mutex::new(
+                LyricOverlayOutput::default(),
+            ));
+            app.manage(LyricOverlayState(overlay_state.clone()));
+            spawn_lyric_overlay_server(overlay_state);
 
             // 强制设置主窗口/任务栏图标（避免仅依赖 exe 资源或系统图标缓存）
             if let Some(icon) = app.default_window_icon().cloned() {
