@@ -128,7 +128,8 @@
   function render(data) {
     if (!host.isConnected) mount();
 
-    const visible = !!(data && data.visible && (data.line || data.next));
+    // 暂停 / 停止播放时不显示（playing=false）
+    const visible = !!(data && data.visible && data.playing && (data.line || data.next));
     if (!visible) {
       if (lastKey !== null) {
         host.style.display = "none";
