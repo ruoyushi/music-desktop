@@ -175,6 +175,12 @@ export const CHART_GROUPS: {
   label: string;
   desc: string;
 }[] = [
+  // 精选歌单放最上面，避免被长列表顶到看不见的地方
+  {
+    key: "playlist",
+    label: "精选歌单",
+    desc: "格莱美 · 获奖精选",
+  },
   {
     key: "featured",
     label: "热门",
@@ -184,11 +190,6 @@ export const CHART_GROUPS: {
     key: "global",
     label: "风格与全球",
     desc: "说唱 · ACG · Billboard 等",
-  },
-  {
-    key: "playlist",
-    label: "精选歌单",
-    desc: "格莱美 · 获奖精选",
   },
 ];
 
