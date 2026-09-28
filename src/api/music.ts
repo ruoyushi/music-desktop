@@ -151,6 +151,22 @@ export const CHART_LIST: ChartInfo[] = [
     blurb: "日本公信榜",
     accent: "#9f1239",
   },
+
+  // —— 精选歌单：非官方榜，按主题整理的现成歌单 ——
+  {
+    id: "102827105",
+    name: "格莱美·年度最佳",
+    group: "playlist",
+    blurb: "历届年度单曲",
+    accent: "#c08a2e",
+  },
+  {
+    id: "9222570215",
+    name: "2026 格莱美",
+    group: "playlist",
+    blurb: "第 68 届全收录",
+    accent: "#0e7490",
+  },
 ];
 
 /** 侧栏分区 */
@@ -168,6 +184,11 @@ export const CHART_GROUPS: {
     key: "global",
     label: "风格与全球",
     desc: "说唱 · ACG · Billboard 等",
+  },
+  {
+    key: "playlist",
+    label: "精选歌单",
+    desc: "格莱美 · 获奖精选",
   },
 ];
 

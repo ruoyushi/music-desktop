@@ -5,6 +5,7 @@ import { NButton, NEmpty, NSpin, useMessage } from "naive-ui";
 import { CHART_GROUPS, CHART_LIST, fetchPlaylist } from "../api/music";
 import type { ChartInfo, PlaylistDetail, Track } from "../types/music";
 import { usePlayerStore } from "../stores/player";
+import { useFavoritesStore } from "../stores/favorites";
 import TrackList from "./TrackList.vue";
 import Icon from "./Icon.vue";
 import { useDownloadModal } from "../composables/useDownloadModal";
@@ -12,6 +13,7 @@ import { useDownloadModal } from "../composables/useDownloadModal";
 const router = useRouter();
 const player = usePlayerStore();
 const message = useMessage();
+const favorites = useFavoritesStore();
 const { open: openDownload } = useDownloadModal();
 
 const charts = CHART_LIST;
@@ -234,6 +236,16 @@ function addAllToQueue() {
   message.success(added > 0 ? `已加入 ${added} 首到队列` : "歌曲已在队列中");
 }
 
+function likeAll() {
+  if (!tracks.value.length) return;
+  const added = favorites.likeMany(tracks.value);
+  message.success(
+    added > 0
+      ? `已收藏 ${added} 首到「我喜欢的音乐」`
+      : "这些歌都已经收藏过了",
+  );
+}
+
 function openAlbum(track: Track) {
   const name = (track.album || "").trim();
   if (!name) {
@@ -354,6 +366,12 @@ onMounted(() => {
                 <Icon name="ri:play-list-add-line" :size="16" />
               </template>
               加入队列
+            </NButton>
+            <NButton :disabled="!tracks.length" @click="likeAll">
+              <template #icon>
+                <Icon name="ri:heart-3-fill" :size="16" />
+              </template>
+              全部收藏
             </NButton>
             <button
               type="button"

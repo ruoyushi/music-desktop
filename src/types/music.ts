@@ -48,7 +48,7 @@ export interface LyricResult {
  * 发现页分区（对齐 music.163.com/#/discover/toplist）
  * featured = 云音乐特色榜；global = 全球媒体榜
  */
-export type ChartGroup = "featured" | "global";
+export type ChartGroup = "featured" | "global" | "playlist";
 
 /** 官方热榜 / 发现页歌单配置 */
 export interface ChartInfo {

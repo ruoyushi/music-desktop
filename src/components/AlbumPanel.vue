@@ -14,6 +14,7 @@ import {
 } from "../api/music";
 import type { Track } from "../types/music";
 import { usePlayerStore } from "../stores/player";
+import { useFavoritesStore } from "../stores/favorites";
 import TrackList from "./TrackList.vue";
 import Icon from "./Icon.vue";
 import { useDownloadModal } from "../composables/useDownloadModal";
@@ -25,6 +26,7 @@ const route = useRoute();
 const router = useRouter();
 const player = usePlayerStore();
 const message = useMessage();
+const favorites = useFavoritesStore();
 const { open: openDownload } = useDownloadModal();
 
 const loading = ref(false);
@@ -245,6 +247,16 @@ function addLoadedToQueue() {
   const added = player.queue.length - before;
   message.success(added > 0 ? `已加入 ${added} 首到队列` : "歌曲已在队列中");
 }
+
+function likeLoaded() {
+  if (!tracks.value.length) return;
+  const added = favorites.likeMany(tracks.value);
+  message.success(
+    added > 0
+      ? `已收藏 ${added} 首到「我喜欢的音乐」`
+      : "这些歌都已经收藏过了",
+  );
+}
 </script>
 
 <template>
@@ -298,6 +310,12 @@ function addLoadedToQueue() {
               <Icon name="ri:play-list-add-line" :size="14" />
             </template>
             加入队列
+          </NButton>
+          <NButton size="small" :disabled="!tracks.length" @click="likeLoaded">
+            <template #icon>
+              <Icon name="ri:heart-3-fill" :size="14" />
+            </template>
+            全部收藏
           </NButton>
           <span v-if="tracks.length" class="meta-count">已加载 {{ tracks.length }} 首</span>
         </div>

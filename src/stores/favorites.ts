@@ -83,6 +83,28 @@ export const useFavoritesStore = defineStore("favorites", () => {
     return true;
   }
 
+  /**
+   * 批量收藏（整张专辑 / 整个歌单）。
+   * 倒序入栈，收藏列表里保持歌单原有顺序；返回新增数量。
+   */
+  function likeMany(tracks: Track[]): number {
+    let added = 0;
+    const likedAt = Date.now();
+    for (let i = tracks.length - 1; i >= 0; i -= 1) {
+      const track = tracks[i];
+      if (!track || track.id == null || !track.source) continue;
+      const key = trackKey(track);
+      const idx = items.value.findIndex((t) => trackKey(t) === key);
+      if (idx >= 0) {
+        items.value.splice(idx, 1);
+      } else {
+        added += 1;
+      }
+      items.value.unshift({ ...track, likedAt });
+    }
+    return added;
+  }
+
   /** 切换收藏；返回切换后是否已收藏 */
   function toggle(track: Track): boolean {
     if (isLiked(track)) {
@@ -106,6 +128,7 @@ export const useFavoritesStore = defineStore("favorites", () => {
     count,
     isLiked,
     like,
+    likeMany,
     unlike,
     toggle,
     clear,
