@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>桌面歌词</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #202124;
+        --muted: #5f6368;
+        --line: rgba(0, 0, 0, 0.12);
+        --hover: rgba(0, 0, 0, 0.045);
+        --off: #cfd4da;
+        --on: #3f8f68;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #202124;
+          --fg: #e8eaed;
+          --muted: #9aa0a6;
+          --line: rgba(255, 255, 255, 0.14);
+          --hover: rgba(255, 255, 255, 0.06);
+          --off: #5f6368;
+          --on: #79b894;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        width: 264px;
+        margin: 0;
+        padding: 14px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .switch {
+        display: inline-flex;
+        cursor: pointer;
+      }
+      .switch input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .track {
+        position: relative;
+        width: 40px;
+        height: 22px;
+        border-radius: 11px;
+        background: var(--off);
+        transition: background 0.15s;
+      }
+      .track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+        transition: transform 0.15s;
+      }
+      .switch input:checked + .track {
+        background: var(--on);
+      }
+      .switch input:checked + .track::after {
+        transform: translateX(18px);
+      }
+      .switch input:focus-visible + .track {
+        outline: 2px solid var(--on);
+        outline-offset: 2px;
+      }
+      .section {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .section-label {
+        margin: 0 0 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .opt {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .opt:hover {
+        background: var(--hover);
+      }
+      .opt input {
+        margin: 0;
+        accent-color: var(--on);
+      }
+      .opt[data-disabled="true"] {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .opt[data-disabled="true"]:hover {
+        background: none;
+      }
+      .status {
+        margin: 10px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+        white-space: pre-line;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="title">桌面歌词</span>
+      <label class="switch">
+        <input type="checkbox" id="enabled" />
+        <span class="track"></span>
+      </label>
+    </header>
+
+    <section class="section">
+      <p class="section-label">歌词显示在哪些屏幕</p>
+      <label class="opt">
+        <input type="radio" name="scope" value="secondary" />
+        <span>只在副屏显示</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="scope" value="all" />
+        <span>所有屏幕都显示</span>
+      </label>
+      <label class="opt" id="opt-here">
+        <input type="radio" name="scope" value="here" id="scope-here" />
+        <span id="here-text">只在这块屏幕</span>
+      </label>
+    </section>
+
+    <p class="status" id="status">正在读取屏幕信息…</p>
+    <script src="popup.js"></script>
+  </body>
+</html>

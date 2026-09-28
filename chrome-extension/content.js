@@ -120,13 +120,20 @@
       writeOffFlag(!enabled);
       event.preventDefault();
       event.stopPropagation();
-      if (!enabled) render(null);
+      if (!enabled) render(null, true);
     },
     true,
   );
 
-  function render(data) {
+  function render(data, allowed) {
     if (!host.isConnected) mount();
+
+    // 总开关关掉、或这块屏幕按设置不该显示时，直接隐藏
+    if (allowed === false) {
+      host.style.display = "none";
+      lastKey = null;
+      return;
+    }
 
     // 暂停 / 停止播放时不显示（playing=false）
     const visible = !!(data && data.visible && data.playing && (data.line || data.next));
@@ -161,7 +168,7 @@
       // 扩展被重新加载时上下文会失效，忽略即可
       return;
     }
-    render(res && res.ok ? res.data : null);
+    render(res && res.ok ? res.data : null, !res || res.allowed !== false);
   }
 
   setInterval(tick, POLL_MS);

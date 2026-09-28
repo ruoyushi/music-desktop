@@ -1,11 +1,23 @@
 {
   "manifest_version": 3,
   "name": "Music Desktop 桌面歌词",
-  "version": "1.0.0",
-  "description": "把 Music Desktop 正在播放的歌词浮动显示在当前网页最上层，浏览器全屏时也可见。",
+  "version": "1.1.0",
+  "description": "把 Music Desktop 正在播放的歌词浮动显示在当前网页最上层，浏览器全屏时也可见；可只在副屏显示，也可随时开关。",
   "minimum_chrome_version": "102",
+  "permissions": ["storage", "system.display"],
   "background": {
     "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Music Desktop 桌面歌词",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/32.png"
+    }
+  },
+  "icons": {
+    "32": "icons/32.png",
+    "128": "icons/128.png"
   },
   "host_permissions": ["http://127.0.0.1/*"],
   "content_scripts": [
