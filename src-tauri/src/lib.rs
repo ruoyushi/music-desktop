@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::{
@@ -197,17 +197,14 @@ async fn download_bytes_with_headers(
     Ok((bytes.to_vec(), content_type))
 }
 
-/// 代理 GD Studio API，规避 WebView CORS
-#[tauri::command]
-async fn proxy_api(params: HashMap<String, String>) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-
+async fn request_json(
+    client: &reqwest::Client,
+    url: &str,
+    params: &HashMap<String, String>,
+) -> Result<Value, String> {
     let resp = client
-        .get(API_BASE)
-        .query(&params)
+        .get(url)
+        .query(params)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -222,6 +219,229 @@ async fn proxy_api(params: HashMap<String, String>) -> Result<Value, String> {
     }
 
     serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {e}; body={text}"))
+}
+
+fn is_netease_source(params: &HashMap<String, String>) -> bool {
+    params
+        .get("source")
+        .map(|source| source.split('_').next() == Some("netease"))
+        .unwrap_or(false)
+}
+
+async fn netease_get(
+    client: &reqwest::Client,
+    url: &str,
+    params: &[(&str, String)],
+) -> Result<Value, String> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", UA)
+        .header("Referer", "https://music.163.com/")
+        .header("Origin", "https://music.163.com")
+        .header("Accept", "application/json, text/plain, */*")
+        .query(params)
+        .send()
+        .await
+        .map_err(|e| format!("网易云接口请求失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("网易云接口 HTTP {}", resp.status()));
+    }
+
+    resp.json::<Value>()
+        .await
+        .map_err(|e| format!("网易云接口返回异常: {e}"))
+}
+
+fn netease_search(data: &Value) -> Result<Value, String> {
+    let songs = data
+        .pointer("/result/songs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "网易云搜索返回格式异常".to_string())?;
+
+    let tracks = songs
+        .iter()
+        .filter_map(|song| {
+            let id = song.get("id")?.clone();
+            let artists = song
+                .get("artists")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|artist| artist.get("name").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "id": id.clone(),
+                "name": song.get("name").and_then(Value::as_str).unwrap_or("未知曲目"),
+                "artist": artists,
+                "album": song.pointer("/album/name").and_then(Value::as_str).unwrap_or(""),
+                "pic_id": id.clone(),
+                "url_id": id.clone(),
+                "lyric_id": id,
+                "source": "netease",
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Value::Array(tracks))
+}
+
+fn netease_song_url(data: &Value) -> Value {
+    let Some(item) = data.get("data").and_then(Value::as_array).and_then(|v| v.first()) else {
+        return Value::Null;
+    };
+    let Some(url) = item.get("url").and_then(Value::as_str) else {
+        return Value::Null;
+    };
+    if url.is_empty() {
+        return Value::Null;
+    }
+
+    let url = normalize_media_url(url);
+    let url = url
+        .strip_prefix("http://")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or(url);
+
+    json!({
+        "url": url,
+        "br": item.get("br").cloned().unwrap_or(Value::Null),
+        "size": item.get("size").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn netease_pic(data: &Value) -> Value {
+    let url = data
+        .pointer("/songs/0/album/picUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    json!({ "url": url })
+}
+
+fn netease_lyric(data: &Value) -> Value {
+    json!({
+        "lyric": data.pointer("/lrc/lyric").and_then(Value::as_str).unwrap_or(""),
+        "tlyric": data.pointer("/tlyric/lyric").and_then(Value::as_str).unwrap_or(""),
+    })
+}
+
+/// GD Studio 整体不可用时，网易云默认音源走官方公开接口直连。
+async fn netease_fallback(
+    client: &reqwest::Client,
+    params: &HashMap<String, String>,
+) -> Result<Option<Value>, String> {
+    match params.get("types").map(String::as_str) {
+        Some("search") => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let count = params
+                .get("count")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(20)
+                .clamp(1, 100);
+            let page = params
+                .get("pages")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1)
+                .max(1);
+            let offset = (page - 1).saturating_mul(count);
+            let data = netease_get(
+                client,
+                "https://music.163.com/api/search/get/web",
+                &[
+                    ("s", name),
+                    ("type", "1".to_string()),
+                    ("limit", count.to_string()),
+                    ("offset", offset.to_string()),
+                ],
+            )
+            .await?;
+            Ok(Some(netease_search(&data)?))
+        }
+        Some("url") => {
+            let id = params.get("id").cloned().unwrap_or_default();
+            let br = params
+                .get("br")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(320);
+            let request_br = match br {
+                999 => 999_000,
+                740 => 999_000,
+                value => value.max(128) * 1000,
+            };
+            let data = netease_get(
+                client,
+                "https://music.163.com/api/song/enhance/player/url",
+                &[
+                    ("id", id.clone()),
+                    ("ids", format!("[{id}]")),
+                    ("br", request_br.to_string()),
+                ],
+            )
+            .await?;
+            Ok(Some(netease_song_url(&data)))
+        }
+        Some("pic") => {
+            let id = params.get("id").cloned().unwrap_or_default();
+            let data = netease_get(
+                client,
+                "https://music.163.com/api/song/detail/",
+                &[("id", id.clone()), ("ids", format!("[{id}]"))],
+            )
+            .await?;
+            Ok(Some(netease_pic(&data)))
+        }
+        Some("lyric") => {
+            let id = params.get("id").cloned().unwrap_or_default();
+            let data = netease_get(
+                client,
+                "https://music.163.com/api/song/lyric",
+                &[
+                    ("id", id),
+                    ("lv", "1".to_string()),
+                    ("kv", "1".to_string()),
+                    ("tv", "-1".to_string()),
+                ],
+            )
+            .await?;
+            Ok(Some(netease_lyric(&data)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// 代理 GD Studio API，规避 WebView CORS；网易云在聚合接口故障时自动直连兜底。
+#[tauri::command]
+async fn proxy_api(params: HashMap<String, String>) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let primary = request_json(&client, API_BASE, &params).await;
+    if let Ok(value) = &primary {
+        if !value.is_null() {
+            return Ok(value.clone());
+        }
+    }
+
+    if is_netease_source(&params) {
+        match netease_fallback(&client, &params).await {
+            Ok(Some(value)) => return Ok(value),
+            Err(fallback_error) => {
+                if let Err(primary_error) = primary {
+                    return Err(format!("{primary_error}; 网易云兜底失败: {fallback_error}"));
+                }
+                return Err(fallback_error);
+            }
+            Ok(None) => {}
+        }
+    }
+
+    primary
 }
 
 /// 将音频直链下载到用户选择的路径
@@ -840,4 +1060,45 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn netease_song_url_uses_https_for_webview() {
+        let data = json!({
+            "data": [{
+                "url": "http://m701.music.126.net/song.mp3",
+                "br": 320001,
+                "size": 12764517
+            }]
+        });
+
+        let result = netease_song_url(&data);
+
+        assert_eq!(result["url"], "https://m701.music.126.net/song.mp3");
+    }
+
+    #[test]
+    #[ignore = "requires live GD Music and NetEase endpoints"]
+    fn netease_search_falls_back_when_gd_api_is_unavailable() {
+        let params = HashMap::from([
+            ("types".to_string(), "search".to_string()),
+            ("source".to_string(), "netease".to_string()),
+            ("name".to_string(), "周杰伦".to_string()),
+            ("count".to_string(), "3".to_string()),
+            ("pages".to_string(), "1".to_string()),
+            ("s".to_string(), "2C1133DD".to_string()),
+        ]);
+
+        let result = tauri::async_runtime::block_on(proxy_api(params))
+            .expect("search should succeed through the NetEase fallback");
+        let tracks = result.as_array().expect("search result should be an array");
+
+        assert!(!tracks.is_empty(), "fallback should return songs");
+        assert_eq!(tracks[0]["source"], "netease");
+        assert!(tracks[0]["id"].as_i64().is_some());
+    }
 }
